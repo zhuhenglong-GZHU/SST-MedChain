@@ -338,7 +338,7 @@ contract RDC {
         ) = dmc.getDelegateRequest(delegationId);
         
         require(isValid, "Delegation request is not valid");
-        require(params[2] == N_prime, "N value does not match");
+        require(params[2] == uint256(keccak256(abi.encodePacked(N_prime))), "Commitment check failed");
         
         uint256 validUntil = block.timestamp + params[3];
         
@@ -426,4 +426,5 @@ contract RDC {
         }
         return out;
     }
+
 }
