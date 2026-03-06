@@ -13,84 +13,13 @@ contract RDC {
     
     address public admin;
     
-    struct DoctorCache {
-        bytes role;
-        bytes department;
-        bool isActive;
-        uint256 timestamp;
-    }
-    
-    struct PatientCache {
-        bool isActive;
-        uint256 timestamp;
-    }
-    
-    mapping(string => DoctorCache) public doctorCache;
-    mapping(string => PatientCache) public patientCache;
-    
-    
-   
-    event AdminChanged(address indexed oldAdmin, address indexed newAdmin);
-    event ContractCalled(string indexed contractName, string indexed functionName);
-    event AccessDecision(
-        string indexed patientId,
-        string indexed doctorId,
-        bool granted,
-        string reason
-    );
-    event AddDelegateRequest(
-        string indexed patientId,
-        string indexed doctorId,
-        uint256[4] params,
-        string operation,
-        bytes[] accessScale
-    );
-    event SetDoctorAttributes(
-        string indexed doctorId,
-        bytes role,
-        bytes department,
-        bytes[] specializations,
-        uint256 licenseNumber,
-        bytes[] additionalAttributes,
-        bool isActive
-    );
-    event SetPatientAttributes(
-        string indexed patientId,
-        bytes gender,
-        uint256 age,
-        bytes[] medicalHistory,
-        bytes[] allergies,
-        bytes bloodType,
-        bytes insuranceInfo,
-        bool isActive
-    );
-    event UpdatePatientAttributes(
-        string indexed patientId,
-        bytes gender,
-        uint256 age,
-        bytes[] medicalHistory,
-        bytes[] allergies,
-        bytes bloodType,
-        bytes insuranceInfo,
-        bool isActive
-    );
-    event DeactivatePatient(string indexed patientId);
-    event DoctorVerifyDelegation(
-        string indexed delegationId,
-        uint256 N_prime,
-        bytes[] encryptedKeys
-    );
-    event EmergencyPauseSystem();
-    event SetPatientMetadata(
-        string indexed patientId,
-        bytes32 accessKey,
-        string CID
-    );
-    
-    // modifier onlyAdmin() {
-    //     require(msg.sender == admin, "Only admin can call this");
-    //     _;
-    // }
+    event DelegationRequested(bytes32 indexed did, string indexed patientId, string indexed doctorId);
+    event DelegationVerified(bytes32 indexed did, string indexed doctorId, uint256 tokenCount);
+    event TokenAccessed(bytes32 indexed tid, bytes32 indexed did, string cid, bytes32 bind);
+    event ReDelegated(bytes32 indexed parentDid, bytes32 indexed newDid, string indexed toDoctorId);
+    event Rollback(bytes32 indexed did, uint256 tokenCount);
+    event Revoked(bytes32 indexed rootDid, uint256 tokenCount);
+    event SetPatientMetadata(string indexed patientId, bytes32 accessKey, string CID);
     
     constructor(
         address _dmcAddress,
@@ -102,329 +31,183 @@ contract RDC {
         smc = SMC(_smcAddress);
         omc = OMC(_omcAddress);
     }
-    
-    function addDelegateRequest(
+    function registerDoctor(string memory doctorId, address owner) external {
+        smc.registerDoctor(doctorId, owner);
+    }
+
+    function registerHospital(string memory hospitalId, address owner) external {
+        smc.registerHospital(hospitalId, owner);
+    }
+
+    function registerPatient(string memory patientId, address owner) external {
+        omc.registerPatient(patientId, owner);
+    }
+
+    function createDelegationRequest(
         string memory patientId,
         string memory doctorId,
-        uint256[4] memory params,
+        bytes32 R,
+        bytes32 c,
+        bytes32[] memory accessKeys,
         string memory operation,
-        bytes[] memory accessScale
-    ) public returns (string memory) {
-        string memory requestId = dmc.addDelegateRequest(
-            patientId, 
-            doctorId, 
-            params, 
-            operation, 
-            accessScale
+        uint256 validUntil,
+        uint256 times,
+        uint256 timestamp,
+        bytes memory sigPatient
+    ) external returns (bytes32 did) {
+        address patientOwner = omc.getPatientOwner(patientId);
+        require(patientOwner != address(0), "Patient not registered");
+        did = dmc.createDelegationRequest(
+            patientId,
+            doctorId,
+            R,
+            c,
+            accessKeys,
+            _opHash(operation),
+            validUntil,
+            times,
+            timestamp,
+            patientOwner,
+            sigPatient
         );
-        emit AddDelegateRequest(patientId, doctorId, params, operation, accessScale);
-        return requestId;
+        emit DelegationRequested(did, patientId, doctorId);
+        return did;
     }
 
-    function reDelegateRequest(
-        string memory parentDelegationId,
-        string memory fromDoctorId,
-        string memory toDoctorId,
-        bytes[] memory keysToDelegate,
-        bytes[] memory newAccessScale,
-        string memory newOperation,
-        uint256 newValidUntil
-    ) public returns (string memory) {
-        (,,, string memory currentDoctorId,, bytes[] memory currentAccessScale, string memory currentOperation, uint256 currentValidUntil, bool isValid) = dmc.getVerifiedDelegation(parentDelegationId);
-        require(isValid, "Parent delegation invalid");
-        require(keccak256(abi.encodePacked(currentDoctorId)) == keccak256(abi.encodePacked(fromDoctorId)), "Not authorized");
-        
-        // Check if parent operation allows re-delegation
-        require(keccak256(abi.encodePacked(currentOperation)) == keccak256(abi.encodePacked("Re-delegation")) || 
-                keccak256(abi.encodePacked(currentOperation)) == keccak256(abi.encodePacked("All")), "Re-delegation not allowed");
-
-        (,,, bool toDoctorActive) = getDoctorInfo(toDoctorId);
-        require(toDoctorActive, "Target doctor inactive");
-
-        require(newValidUntil <= currentValidUntil, "Validity exceeds parent");
-        
-        for(uint i=0; i<newAccessScale.length; i++) {
-            bool found = false;
-            for(uint j=0; j<currentAccessScale.length; j++) {
-                if(keccak256(newAccessScale[i]) == keccak256(currentAccessScale[j])) {
-                    found = true;
-                    break;
-                }
-            }
-            require(found, "Access scale not subset");
-        }
-
-        return dmc.reDelegate(parentDelegationId, toDoctorId, keysToDelegate, newAccessScale, newOperation, newValidUntil);
-    }
-
-    function revokeDelegation(string memory delegationId, string memory revokerId) public {
-        (, string memory parentDelegationId, string memory patientId, string memory doctorId,,,,,) = dmc.getVerifiedDelegation(delegationId);
-        
-        bool isAuthorized = false;
-        if (keccak256(abi.encodePacked(revokerId)) == keccak256(abi.encodePacked(patientId))) {
-            isAuthorized = true;
-        } else if (bytes(parentDelegationId).length > 0) {
-             (,,, string memory parentDoctorId,,,,,) = dmc.getVerifiedDelegation(parentDelegationId);
-             if (keccak256(abi.encodePacked(revokerId)) == keccak256(abi.encodePacked(parentDoctorId))) {
-                 isAuthorized = true;
-             }
-        }
-        
-        require(isAuthorized, "Not authorized to revoke");
-        dmc.revokeDelegation(delegationId, revokerId);
-    }
-    
-    function setDoctorAttributes(
+    function verifyDelegation(
+        bytes32 did,
         string memory doctorId,
-        bytes memory role,
-        bytes memory department,
-        bytes[] memory specializations,
-        uint256 licenseNumber,
-        bytes[] memory additionalAttributes,
-        bool isActive
-    ) public {
-        smc.setSubjectAttributes(
-            doctorId,
-            role,
-            department,
-            specializations,
-            licenseNumber,
-            additionalAttributes,
-            isActive
-        );
-        emit SetDoctorAttributes(
-            doctorId,
-            role,
-            department,
-            specializations,
-            licenseNumber,
-            additionalAttributes,
-            isActive
-        );
-    }
-    
-    function setPatientAttributes(
-        string memory patientId,
-        bytes memory gender,
-        uint256 age,
-        bytes[] memory medicalHistory,
-        bytes[] memory allergies,
-        bytes memory bloodType,
-        bytes memory insuranceInfo,
-        bool isActive
-    ) public {
-        omc.setPatientAttributes(
-            patientId, 
-            gender, 
-            age, 
-            medicalHistory, 
-            allergies, 
-            bloodType, 
-            insuranceInfo, 
-            isActive
-        );
-        emit SetPatientAttributes(
-            patientId,
-            gender,
-            age,
-            medicalHistory,
-            allergies,
-            bloodType,
-            insuranceInfo,
-            isActive
-        );
-    }
-    
-    function updatePatientAttributes(
-        string memory patientId,
-        bytes memory gender,
-        uint256 age,
-        bytes[] memory medicalHistory,
-        bytes[] memory allergies,
-        bytes memory bloodType,
-        bytes memory insuranceInfo,
-        bool isActive
-    ) public {
-        omc.updatePatientAttributes(
-            patientId, 
-            gender, 
-            age, 
-            medicalHistory, 
-            allergies, 
-            bloodType, 
-            insuranceInfo, 
-            isActive
-        );
-        emit UpdatePatientAttributes(
-            patientId,
-            gender,
-            age,
-            medicalHistory,
-            allergies,
-            bloodType,
-            insuranceInfo,
-            isActive
-        );
-    }
-    
-    function deactivatePatient(string memory patientId) public {
-        omc.deactivatePatient(patientId);
-        emit DeactivatePatient(patientId);
-    }
-    
-    function updateDoctorCache(string memory doctorId) public {
-        (bytes memory role, bytes memory department, , , , bool isActive) = 
-            smc.getDoctorAttributes(doctorId);
-        
-        doctorCache[doctorId] = DoctorCache({
-            role: role,
-            department: department,
-            isActive: isActive,
-            timestamp: block.timestamp
-        });
-    }
-    
-    function updatePatientCache(string memory patientId) public {
-        (bool exists, bool isActive) = omc.getPatientStatus(patientId);
-        patientCache[patientId] = PatientCache({
-            isActive: exists && isActive,
-            timestamp: block.timestamp
-        });
-    }
-    
-    function accessViaDelegation(
-        string memory patientId,
-        string memory delegationId,
-        bytes memory encryptedKey
-    ) public returns (bool granted, bytes[] memory data, string memory reason, string[] memory metadata) {
-        (bool isValid, uint256 validUntil, bool keyValid, bytes[] memory accessScale) = 
-            dmc.checkDelegationStatus(delegationId, encryptedKey);
-
-        if (!isValid || validUntil < block.timestamp || !keyValid) {
-            data = new bytes[](0);
-            metadata = new string[](0);
-            if (!isValid) {
-                reason = "Delegation not valid";
-            } else if (validUntil < block.timestamp) {
-                reason = "Delegation expired";
-            } else {
-                reason = "Key not valid";
-            }
-            return (false, data, reason, metadata);
-        }
-
-        granted = true;
-        data = accessScale;
-        reason = "Access granted via delegation";
-        metadata = _getMetadatas(patientId, accessScale);
-
-        dmc.markKeyAsUsed(delegationId, encryptedKey);
-        return (granted, data, reason, metadata);
+        bytes32 NPrime,
+        bytes[] memory wList,
+        bytes memory sigDoctor
+    ) external {
+        address doctorOwner = smc.getDoctorOwner(doctorId);
+        require(doctorOwner != address(0), "Doctor not registered");
+        dmc.verifyDelegation(did, doctorId, NPrime, wList, doctorOwner, sigDoctor);
+        emit DelegationVerified(did, doctorId, wList.length);
     }
 
-    function doctorVerifyDelegation(
-        string memory delegationId,
-        uint256 N_prime,
-        bytes[] memory encryptedKeys
-    ) public {
-        (
-            ,
-            string memory patientId,
-            string memory doctorId,
-            uint256[4] memory params,
-            string memory operation,
-            bytes[] memory accessScale,
-            bool isValid
-        ) = dmc.getDelegateRequest(delegationId);
-        
-        require(isValid, "Delegation request is not valid");
-        require(params[2] == uint256(keccak256(abi.encodePacked(N_prime))), "Commitment check failed");
-        
-        uint256 validUntil = block.timestamp + params[3];
-        
-        dmc.verifyDelegation(
-            delegationId,
-            patientId,
-            doctorId,
-            encryptedKeys,
-            accessScale,
-            operation,
-            validUntil
-        );
-        emit DoctorVerifyDelegation(delegationId, N_prime, encryptedKeys);
-    }
-    
-    // function emergencyPauseSystem() public onlyAdmin {
-    //     emit EmergencyPauseSystem();
-    // }
-    
-    function getDoctorInfo(string memory doctorId) public view returns (
-        bytes memory role,
-        bytes memory department,
-        bytes[] memory specializations,
-        bool isActive
-    ) {
-        (role, department, specializations, , , isActive) = smc.getDoctorAttributes(doctorId);
-        return (role, department, specializations, isActive);
-    }
-    
-
-    
-    function getPatientRecordPolicy(string memory patientId) public view returns (bytes32) {
-        return patientRecords[patientId].policyHash;
-    }
-    
-    struct MedicalRecord {
-        string patientId;
-        bytes encryptedData;
-        bytes32 policyHash;
-        uint256 createdAt;
-        uint256 updatedAt;
-        bool isActive;
-    }
-    
-    mapping(string => MedicalRecord) private patientRecords;
-    
-    function _createMedicalRecord(
-        string memory patientId,
-        bytes memory encryptedData,
-        bytes32 policyHash
-    ) private {
-        patientRecords[patientId] = MedicalRecord({
-            patientId: patientId,
-            encryptedData: encryptedData,
-            policyHash: policyHash,
-            createdAt: block.timestamp,
-            updatedAt: block.timestamp,
-            isActive: true
-        });
-    }
-    
-    function _getMetadatas(string memory patientId, bytes[] memory accessScales) internal view returns (string[] memory) {
-        string[] memory cids = new string[](accessScales.length);
-        for (uint256 i = 0; i < accessScales.length; i++) {
-            bytes32 accessKey = _bytesToBytes32(accessScales[i]);
-            cids[i] = omc.getPatientMetadata(patientId, accessKey);
-        }
-        return cids;
-    }
-    
-    function setPatientMetadata(
+    function consume(
+        bytes memory w,
         string memory patientId,
         bytes32 accessKey,
-        string memory CID
-    ) public {
+        string memory operation,
+        string memory hospitalId,
+        string memory ownerDoctorId,
+        bytes memory sigOwner
+    ) external returns (string memory cid, bytes32 tid, bytes32 bind) {
+        address owner = smc.getDoctorOwner(ownerDoctorId);
+        require(owner != address(0), "Owner not registered");
+
+        bytes32 opHash = _opHash(operation);
+        bytes32 did;
+        (tid, did) = dmc.consumeToken(w, patientId, accessKey, opHash, hospitalId, ownerDoctorId, owner, sigOwner);
+        cid = omc.getPatientMetadata(patientId, accessKey);
+        string[] memory cids = new string[](1);
+        cids[0] = cid;
+        bytes32 cidsHash = _hashCidsCanonical(cids);
+        bind = sha256(abi.encode(tid, patientId, accessKey, opHash, hospitalId, cidsHash));
+        dmc.setBind(tid, bind);
+        emit TokenAccessed(tid, did, cid, bind);
+        return (cid, tid, bind);
+    }
+
+    function targetVerify(bytes32 tid, bytes32 bind) external view returns (bool) {
+        return dmc.verifyBind(tid, bind);
+    }
+
+    function reDelegate(
+        bytes32 parentDid,
+        string memory fromDoctorId,
+        string memory toDoctorId,
+        bytes32[] memory tids,
+        bytes32[] memory newAccessKeys,
+        string memory newOperation,
+        uint256 newValidUntil,
+        uint256 timestamp,
+        bytes memory sigFromDoctor
+    ) external returns (bytes32 newDid) {
+        address fromOwner = smc.getDoctorOwner(fromDoctorId);
+        require(fromOwner != address(0), "Delegator not registered");
+        newDid = dmc.reDelegate(
+            parentDid,
+            fromDoctorId,
+            toDoctorId,
+            tids,
+            newAccessKeys,
+            _opHash(newOperation),
+            newValidUntil,
+            timestamp,
+            fromOwner,
+            sigFromDoctor
+        );
+        emit ReDelegated(parentDid, newDid, toDoctorId);
+        return newDid;
+    }
+
+    function rollbackToParent(
+        bytes32 did,
+        bytes32[] memory tids,
+        string memory delegatorDoctorId,
+        bytes memory sigDelegator
+    ) external {
+        address delegatorOwner = smc.getDoctorOwner(delegatorDoctorId);
+        require(delegatorOwner != address(0), "Delegator not registered");
+        dmc.rollbackToParent(did, tids, delegatorDoctorId, delegatorOwner, sigDelegator);
+        emit Rollback(did, tids.length);
+    }
+
+    function revokeRoot(
+        bytes32 rootDid,
+        string memory patientId,
+        bytes memory sigPatient
+    ) external {
+        (string memory boundPatientId,, bool exists) = dmc.getVerifiedParties(rootDid);
+        require(exists, "Root delegation missing");
+        require(_eqString(boundPatientId, patientId), "Patient mismatch");
+        address patientOwner = omc.getPatientOwner(patientId);
+        require(patientOwner != address(0), "Patient not registered");
+        dmc.revokeRoot(rootDid, patientOwner, sigPatient);
+        emit Revoked(rootDid, dmc.getRootTokenCount(rootDid));
+    }
+
+    function setPatientMetadata(string memory patientId, bytes32 accessKey, string memory CID) external {
         omc.setPatientMetadata(patientId, accessKey, CID);
         emit SetPatientMetadata(patientId, accessKey, CID);
     }
-    
-    function _bytesToBytes32(bytes memory b) internal pure returns (bytes32) {
-        require(b.length == 32, "Invalid accessKey length");
-        bytes32 out;
-        assembly {
-            out := mload(add(b, 32))
-        }
-        return out;
+
+    function _opHash(string memory operation) internal pure returns (bytes32) {
+        if (bytes(operation).length == 0) return bytes32(0);
+        return keccak256(bytes(operation));
     }
 
+    function _eqString(string memory a, string memory b) internal pure returns (bool) {
+        return keccak256(abi.encodePacked(a)) == keccak256(abi.encodePacked(b));
+    }
+
+    function _hashCidsCanonical(string[] memory cids) internal pure returns (bytes32) {
+        if (cids.length > 1) {
+            for (uint256 i = 0; i < cids.length; i++) {
+                for (uint256 j = i + 1; j < cids.length; j++) {
+                    if (_stringLt(cids[j], cids[i])) {
+                        string memory tmp = cids[i];
+                        cids[i] = cids[j];
+                        cids[j] = tmp;
+                    }
+                }
+            }
+        }
+        return sha256(abi.encode(cids));
+    }
+
+    function _stringLt(string memory a, string memory b) internal pure returns (bool) {
+        bytes memory ba = bytes(a);
+        bytes memory bb = bytes(b);
+        uint256 minLen = ba.length < bb.length ? ba.length : bb.length;
+        for (uint256 i = 0; i < minLen; i++) {
+            if (ba[i] < bb[i]) return true;
+            if (ba[i] > bb[i]) return false;
+        }
+        return ba.length < bb.length;
+    }
 }

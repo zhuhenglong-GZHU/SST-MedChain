@@ -3,6 +3,8 @@ pragma solidity ^0.6.10;
 pragma experimental ABIEncoderV2;
 contract OMC {
     address public admin;
+
+    mapping(string => address) public patientOwners;
     
     struct PatientAttributes {
         string patientId;
@@ -48,6 +50,21 @@ contract OMC {
     );
     
     event DeactivatePatient(string indexed patientId);
+    event PatientRegistered(string indexed patientId, address owner);
+
+    constructor() public {
+        admin = msg.sender;
+    }
+
+    function registerPatient(string memory patientId, address owner) public {
+        require(msg.sender == admin, "Only admin");
+        patientOwners[patientId] = owner;
+        emit PatientRegistered(patientId, owner);
+    }
+
+    function getPatientOwner(string memory patientId) external view returns (address) {
+        return patientOwners[patientId];
+    }
     
     function setPatientAttributes(
         string memory patientId,

@@ -5,6 +5,7 @@ contract SMC {
     address public admin;
     
     mapping(string => address) public doctorOwners;
+    mapping(string => address) public hospitalOwners;
     
     struct SubjectAttributes {
         bytes role;
@@ -29,6 +30,31 @@ contract SMC {
     event SubAttributesUpdated(string indexed doctorId);
     event EnvAttributesUpdated(string indexed sessionId);
     event DoctorRegistered(string indexed doctorId, address owner);
+    event HospitalRegistered(string indexed hospitalId, address owner);
+
+    constructor() public {
+        admin = msg.sender;
+    }
+
+    function registerDoctor(string memory doctorId, address owner) public {
+        require(msg.sender == admin, "Only admin");
+        doctorOwners[doctorId] = owner;
+        emit DoctorRegistered(doctorId, owner);
+    }
+
+    function registerHospital(string memory hospitalId, address owner) public {
+        require(msg.sender == admin, "Only admin");
+        hospitalOwners[hospitalId] = owner;
+        emit HospitalRegistered(hospitalId, owner);
+    }
+
+    function getDoctorOwner(string memory doctorId) external view returns (address) {
+        return doctorOwners[doctorId];
+    }
+
+    function getHospitalOwner(string memory hospitalId) external view returns (address) {
+        return hospitalOwners[hospitalId];
+    }
     
     function setSubjectAttributes(
         string memory doctorId,
